@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Image Match Proof of Concept</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #111;
+    color: white;
+    font-family: system-ui, -apple-system, sans-serif;
+    text-align: center;
+  }
+  header { padding: 14px 12px 8px; }
+  h1 { margin: 0 0 6px; font-size: 21px; }
+  #status { font-size: 14px; min-height: 22px; }
+  #cameraWrap {
+    position: relative;
+    width: 100%;
+    max-width: 700px;
+    margin: 0 auto;
+    background: black;
+    overflow: hidden;
+  }
+  video {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  #guide {
+    position: absolute;
+    left: 10%;
+    top: 12%;
+    width: 80%;
+    height: 76%;
+    border: 2px solid rgba(255,255,255,.75);
+    border-radius: 12px;
+    pointer-events: none;
+  }
+  #result {
+    margin: 12px auto;
+    max-width: 600px;
+    padding: 14px;
+    border-radius: 12px;
+    background: #222;
+    display: none;
+  }
+  #result.matched { background: #173d24; display: block; }
+  button, a {
+    display: inline-block;
+    border: 0;
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-size: 16px;
+    font-weight: 600;
+    margin: 6px;
+  }
+  button { background: white; color: black; }
+  a { background: #4caf50; color: white; text-decoration: none; }
+  #debug {
+    font-size: 12px;
+    color: #aaa;
+    padding: 4px 12px 18px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Image Match Proof of Concept</h1>
+  <div id="status">Loading image-matching engine…</div>
+</header>
+
+<div id="cameraWrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="guide"></div>
+</div>
+
+<div>
+  <button id="start" disabled>Start camera</button>
+</div>
+
+<div id="result">
+  <strong>✓ Image recognised</strong>
+  <div style="margin-top:6px">The target picture has been matched.</div>
+  <a id="openLink" href="https://www.tintin.com/" target="_blank" rel="noopener">Open webpage</a>
+</div>
+
+<div id="debug"></div>
+
+<script async src="https://docs.opencv.org/4.x/opencv.js"
+        onload="opencvReady()"></script>
+
+<script>
+const video = document.getElementById("video");
+const startBtn = document.getElementById("start");
+const statusEl = document.getElementById("status");
+const debugEl = document.getElementById("debug");
+const resultEl = document.getElementById("result");
+
+let referenceImg;
+let referenceKeypoints;
+let referenceDescriptors;
+let running = false;
+let lastCheck = 0;
+let goodStreak = 0;
+
+// Change this later to whatever page you want the recognised image to open.
+const TARGET_URL = "https://www.tintin.com/";
+
+function opencvReady() {
+  statusEl.textContent = "Loading reference image…";
+  referenceImg = new Image();
+  referenceImg.onload = prepareReference;
+  referenceImg.onerror = () => {
+    statusEl.textContent = "Could not load reference.jpg";
+  };
+  referenceImg.src = "reference.jpg";
+}
+
+function prepareReference() {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = referenceImg.naturalWidth;
+    canvas.height = referenceImg.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(referenceImg, 0, 0);
+
+    const src = cv.imread(canvas);
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    const orb = new cv.ORB(1200);
+    referenceKeypoints = new cv.KeyPointVector();
+    referenceDescriptors = new cv.Mat();
+    orb.detectAndCompute(gray, new cv.Mat(), referenceKeypoints, referenceDescriptors);
+
+    src.delete();
+    gray.delete();
+    orb.delete();
+
+    statusEl.textContent =
+      "Reference loaded. Point the camera at the picture and tap Start camera.";
+    startBtn.disabled = false;
+  } catch (e) {
+    statusEl.textContent = "OpenCV error: " + e.message;
+  }
+}
+
+startBtn.addEventListener("click", async () => {
+  if (running) return;
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    });
+
+    video.srcObject = stream;
+    running = true;
+    startBtn.textContent = "Scanning…";
+    startBtn.disabled = true;
+    statusEl.textContent = "Scanning for the reference image…";
+    requestAnimationFrame(scan);
+  } catch (e) {
+    statusEl.textContent = "Camera error: " + e.message;
+  }
+});
+
+function scan(timestamp) {
+  if (!running) return;
+
+  // Don't process every video frame — this is much easier on an iPhone.
+  if (timestamp - lastCheck > 350 && video.readyState >= 2) {
+    lastCheck = timestamp;
+    tryMatch();
+  }
+
+  requestAnimationFrame(scan);
+}
+
+function tryMatch() {
+  const canvas = document.createElement("canvas");
+
+  // Keep processing small enough for a phone.
+  const maxWidth = 640;
+  const scale = Math.min(1, maxWidth / video.videoWidth);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const frame = cv.imread(canvas);
+  const gray = new cv.Mat();
+  cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
+
+  const orb = new cv.ORB(1000);
+  const kp = new cv.KeyPointVector();
+  const desc = new cv.Mat();
+  orb.detectAndCompute(gray, new cv.Mat(), kp, desc);
+
+  let good = 0;
+  let inliers = 0;
+
+  if (!desc.empty() && desc.rows >= 2) {
+    const matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    const matches = new cv.DMatchVectorVector();
+
+    matcher.knnMatch(desc, referenceDescriptors, matches, 2);
+
+    // Lowe ratio test.
+    for (let i = 0; i < matches.size(); i++) {
+      const pair = matches.get(i);
+      if (pair.size() >= 2) {
+        const m = pair.get(0);
+        const n = pair.get(1);
+        if (m.distance < 0.72 * n.distance) good++;
+      }
+    }
+
+    // A simple but useful threshold for the proof of concept.
+    // The homography check below is used as an additional confirmation.
+    if (good >= 12) {
+      // Collect good matches for a homography/RANSAC check.
+      const goodMatches = [];
+      for (let i = 0; i < matches.size(); i++) {
+        const pair = matches.get(i);
+        if (pair.size() >= 2) {
+          const m = pair.get(0);
+          const n = pair.get(1);
+          if (m.distance < 0.72 * n.distance) goodMatches.push(m);
+        }
+      }
+
+      if (goodMatches.length >= 8) {
+        const srcPts = new cv.Mat(goodMatches.length, 1, cv.CV_32FC2);
+        const dstPts = new cv.Mat(goodMatches.length, 1, cv.CV_32FC2);
+
+        for (let i = 0; i < goodMatches.length; i++) {
+          const m = goodMatches[i];
+          const p1 = kp.get(m.queryIdx).pt;
+          const p2 = referenceKeypoints.get(m.trainIdx).pt;
+          srcPts.data32F[i*2] = p1.x;
+          srcPts.data32F[i*2+1] = p1.y;
+          dstPts.data32F[i*2] = p2.x;
+          dstPts.data32F[i*2+1] = p2.y;
+        }
+
+        const mask = new cv.Mat();
+        const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
+
+        if (!H.empty()) {
+          for (let i = 0; i < mask.rows; i++) {
+            if (mask.ucharAt(i, 0)) inliers++;
+          }
+        }
+
+        H.delete();
+        mask.delete();
+        srcPts.delete();
+        dstPts.delete();
+      }
+    }
+
+    matches.delete();
+    matcher.delete();
+  }
+
+  debugEl.textContent =
+    "Features: " + kp.size() +
+    " | good matches: " + good +
+    " | geometric inliers: " + inliers;
+
+  // Require two consecutive positive scans to reduce accidental matches.
+  if (good >= 12 && inliers >= 8) {
+    goodStreak++;
+  } else {
+    goodStreak = Math.max(0, goodStreak - 1);
+  }
+
+  if (goodStreak >= 2) {
+    showMatch();
+  }
+
+  frame.delete();
+  gray.delete();
+  orb.delete();
+  kp.delete();
+  desc.delete();
+}
+
+function showMatch() {
+  if (resultEl.classList.contains("matched")) return;
+
+  resultEl.classList.add("matched");
+  statusEl.textContent = "Image recognised!";
+  document.getElementById("openLink").href = TARGET_URL;
+
+  // Don't automatically leave the page — let the user tap the link.
+  // This is friendlier on iPhone and avoids popup/permission issues.
+}
+</script>
+
+</body>
+</html>
